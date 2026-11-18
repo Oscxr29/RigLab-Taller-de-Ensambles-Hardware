@@ -7,11 +7,20 @@ import {
   eliminarComponente,
   listarComponentes,
   obtenerComponentePorId,
+  obtenerDiagnosticoExtremos,
+  obtenerEsquemaComponentes,
+  obtenerResumenPorCategoria,
   obtenerTelemetria,
   type CriterioOrden,
   type FiltrosConsulta,
 } from './repositories/componenteRepo';
-import { inicializarBaseDeDatos, reiniciarTaller } from './services/database';
+import {
+  inicializarBaseDeDatos,
+  importarBaseDeDatos,
+  obtenerDB,
+  obtenerConsultasSQL,
+  reiniciarTaller,
+} from './services/database';
 import { renderizarAplicacion, type EstadoUI } from './ui/render';
 
 const appContainer = document.querySelector<HTMLDivElement>('#app');
@@ -35,10 +44,18 @@ function actualizarVista(): void {
 
   const componentes = listarComponentes(filtrosActuales);
   const telemetria = obtenerTelemetria();
+  const resumenCategorias = obtenerResumenPorCategoria();
+  const diagnostico = obtenerDiagnosticoExtremos();
+  const esquema = obtenerEsquemaComponentes();
+  const consultasSQL = obtenerConsultasSQL();
 
   renderizarAplicacion(appContainer, {
     componentes,
     telemetria,
+    resumenCategorias,
+    diagnostico,
+    esquema,
+    consultasSQL,
     filtros: filtrosActuales,
     componenteEditando,
     mensajeFeedback,
@@ -115,6 +132,77 @@ function enlazarEventos(): void {
       };
       actualizarVista();
     }
+  });
+
+  const inputEstado = document.getElementById('input-estado') as HTMLInputElement | null;
+  document.querySelectorAll<HTMLButtonElement>('.pildora-estado').forEach((pildora) => {
+    pildora.addEventListener('click', () => {
+      const estado = pildora.dataset.estado ?? 'Estable';
+      if (inputEstado) inputEstado.value = estado;
+      document.querySelectorAll<HTMLButtonElement>('.pildora-estado').forEach((item) => {
+        const activo = item.dataset.estado === estado;
+        item.classList.toggle('activo', activo);
+        item.setAttribute('aria-pressed', activo ? 'true' : 'false');
+      });
+    });
+
+    document.querySelectorAll<HTMLButtonElement>('.preset-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const presets: Record<string, {
+          nombre: string;
+          categoria: string;
+          consumo: number;
+          precio: number;
+          estado: EstadoComponente;
+          notas: string;
+        }> = {
+          entrada: {
+            nombre: 'Rig Oficina / Entrada Ryzen 5',
+            categoria: 'Ensamble Completo',
+            consumo: 140,
+            precio: 480,
+            estado: 'Estable',
+            notas: 'Equipo base probado para tareas ligeras y ofimática.',
+          },
+          media: {
+            nombre: 'Rig Gaming 1080p RX 7600',
+            categoria: 'Ensamble Completo',
+            consumo: 310,
+            precio: 920,
+            estado: 'En Prueba',
+            notas: 'Validando flujo térmico y estabilidad en sesión continua.',
+          },
+          alta: {
+            nombre: 'Workstation RTX 4080 Super',
+            categoria: 'Ensamble Completo',
+            consumo: 520,
+            precio: 2150,
+            estado: 'Estable',
+            notas: 'Ensamble de alto rendimiento bajo prueba de carga sostenida.',
+          },
+        };
+        const preset = presets[chip.dataset.preset ?? ''];
+        if (!preset) return;
+
+        (document.getElementById('input-nombre') as HTMLInputElement | null)?.setAttribute('value', preset.nombre);
+        const inputNombre = document.getElementById('input-nombre') as HTMLInputElement | null;
+        if (inputNombre) inputNombre.value = preset.nombre;
+        const selectCategoria = document.getElementById('select-categoria') as HTMLSelectElement | null;
+        if (selectCategoria) selectCategoria.value = preset.categoria;
+        const inputConsumo = document.getElementById('input-consumo') as HTMLInputElement | null;
+        if (inputConsumo) inputConsumo.value = String(preset.consumo);
+        const inputPrecio = document.getElementById('input-precio') as HTMLInputElement | null;
+        if (inputPrecio) inputPrecio.value = preset.precio.toFixed(2);
+        const inputNotas = document.getElementById('input-notas') as HTMLTextAreaElement | null;
+        if (inputNotas) inputNotas.value = preset.notas;
+        if (inputEstado) inputEstado.value = preset.estado;
+        document.querySelectorAll<HTMLButtonElement>('.pildora-estado').forEach((pildora) => {
+          const activo = pildora.dataset.estado === preset.estado;
+          pildora.classList.toggle('activo', activo);
+          pildora.setAttribute('aria-pressed', activo ? 'true' : 'false');
+        });
+      });
+    });
   });
 
   // 3. Cancelar edición
@@ -233,11 +321,61 @@ function enlazarEventos(): void {
     });
   });
 
+  // Exporta una copia binaria real de la base SQLite activa.
+  const btnDescargarBackup = document.getElementById('btn-descargar-backup');
+  btnDescargarBackup?.addEventListener('click', () => {
+    const bytes: Uint8Array = obtenerDB().export();
+    const copia = new Uint8Array(bytes.byteLength);
+    copia.set(bytes);
+    const blob = new Blob([copia], { type: 'application/vnd.sqlite3' });
+    const url = URL.createObjectURL(blob);
+    const enlace = document.createElement('a');
+    enlace.href = url;
+    enlace.download = 'riglab_backup.sqlite';
+    document.body.appendChild(enlace);
+    enlace.click();
+    enlace.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  const btnImportarBackup = document.getElementById('btn-importar-backup');
+  const inputImportarBackup = document.getElementById('input-importar-backup') as HTMLInputElement | null;
+  btnImportarBackup?.addEventListener('click', () => inputImportarBackup?.click());
+  inputImportarBackup?.addEventListener('change', async () => {
+    const archivo = inputImportarBackup.files?.[0];
+    if (!archivo) return;
+
+    try {
+      const bytes = new Uint8Array(await archivo.arrayBuffer());
+      const resultado = await importarBaseDeDatos(bytes);
+      if (!resultado.ok) {
+        mensajeFeedback = {
+          tipo: 'error',
+          textos: [resultado.error ?? 'El respaldo SQLite no pudo ser importado.'],
+        };
+      } else {
+        componenteEditando = null;
+        mensajeFeedback = {
+          tipo: 'exito',
+          textos: [`Respaldo "${archivo.name}" importado correctamente en SQLite.`],
+        };
+      }
+    } catch {
+      mensajeFeedback = {
+        tipo: 'error',
+        textos: ['No se pudo leer el archivo seleccionado.'],
+      };
+    } finally {
+      inputImportarBackup.value = '';
+      actualizarVista();
+    }
+  });
+
   // 8. Botón Restaurar datos de ejemplo
   const btnReiniciar = document.getElementById('btn-reiniciar-taller');
   btnReiniciar?.addEventListener('click', async () => {
     const confirmado = window.confirm(
-      '¿Deseas borrar tus cambios locales y restaurar los 4 componentes iniciales de demostración?'
+      '¿Deseas borrar tus cambios locales y restaurar los 12 componentes iniciales de demostración?'
     );
     if (!confirmado) return;
 

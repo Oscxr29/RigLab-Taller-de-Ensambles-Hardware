@@ -4,6 +4,37 @@ const STORAGE_KEY = 'riglab_sqlite_db_v1';
 
 let dbInstance: Database | null = null;
 
+export interface ConsultaSQLRegistrada {
+  sql: string;
+  fecha: string;
+  operacion: 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE' | 'CREATE' | 'PRAGMA' | 'SQL';
+}
+
+const consultasRegistradas: ConsultaSQLRegistrada[] = [];
+
+/** Registra consultas técnicas conservando únicamente las últimas seis. */
+export function registrarConsultaSQL(sql: string): void {
+  const normalizada = sql.trim().replace(/\s+/g, ' ');
+  const primera = normalizada.split(' ')[0].toUpperCase();
+  const operacion =
+    primera === 'SELECT' || primera === 'INSERT' || primera === 'UPDATE' ||
+    primera === 'DELETE' || primera === 'CREATE' || primera === 'PRAGMA'
+      ? primera
+      : 'SQL';
+
+  consultasRegistradas.push({
+    sql: normalizada,
+    fecha: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    operacion,
+  });
+  if (consultasRegistradas.length > 6) consultasRegistradas.shift();
+}
+
+/** Devuelve una copia estable de las consultas SQL recientes. */
+export function obtenerConsultasSQL(): ConsultaSQLRegistrada[] {
+  return [...consultasRegistradas];
+}
+
 /**
  * Convierte un Uint8Array (archivo SQLite binario) a cadena Base64 para localStorage.
  */
@@ -48,6 +79,7 @@ function crearEsquema(db: Database): void {
  * Inserta registros iniciales de demostración cuando la base de datos está vacía.
  */
 function insertarDatosIniciales(db: Database): void {
+  registrarConsultaSQL('INSERT INTO componentes (nombre, categoria, consumo, precio, estado, notas) VALUES (?, ?, ?, ?, ?, ?);');
   const stmt = db.prepare(`
     INSERT INTO componentes (nombre, categoria, consumo, precio, estado, notas)
     VALUES (?, ?, ?, ?, ?, ?);
@@ -60,7 +92,15 @@ function insertarDatosIniciales(db: Database): void {
       220,
       599.99,
       'Estable',
-      'Curva de ventiladores ajustada. Temperatura máxima 67°C bajo carga.',
+      'Gama alta. Curva de ventiladores ajustada, máxima 67°C bajo carga.',
+    ],
+    [
+      'AMD Radeon RX 7600 XT 16GB',
+      'GPU',
+      190,
+      329.99,
+      'Estable',
+      'Gama media. Undervolt estable a 1080mV en pruebas de estrés.',
     ],
     [
       'AMD Ryzen 7 7800X3D',
@@ -68,7 +108,23 @@ function insertarDatosIniciales(db: Database): void {
       120,
       389.0,
       'Estable',
-      'PBO configurado con Curve Optimizer -20 en todos los núcleos.',
+      'Gama alta. PBO con Curve Optimizer -20 en todos los núcleos.',
+    ],
+    [
+      'Intel Core i5-13400F',
+      'CPU',
+      65,
+      185.5,
+      'En Prueba',
+      'Gama media. Verificando temperaturas con disipador de stock.',
+    ],
+    [
+      'ASUS ROG Strix B650-A WiFi',
+      'Placa Madre',
+      50,
+      219.99,
+      'Estable',
+      'BIOS 2409. Perfil EXPO activo y VRM a 48°C.',
     ],
     [
       'Corsair Vengeance DDR5 32GB (2x16GB) 6000MHz',
@@ -76,7 +132,39 @@ function insertarDatosIniciales(db: Database): void {
       10,
       114.5,
       'En Prueba',
-      'Verificando estabilidad de perfil EXPO en MemTest86.',
+      'Validando estabilidad de perfil EXPO en MemTest86.',
+    ],
+    [
+      'Kingston Fury Beast DDR4 16GB (2x8GB) 3200MHz',
+      'RAM',
+      8,
+      44.99,
+      'Estable',
+      'Kit económico probado para ensambles de entrada.',
+    ],
+    [
+      'Samsung 990 Pro NVMe 2TB',
+      'Almacenamiento',
+      8,
+      169.99,
+      'Estable',
+      'Firmware actualizado. 42°C con disipador pasivo.',
+    ],
+    [
+      'NZXT Kraken 240 RGB',
+      'Enfriamiento',
+      15,
+      139.99,
+      'Estable',
+      'Bomba fijada al 80% y curva PWM silenciosa.',
+    ],
+    [
+      'MSI MPG A850G PCIE5 850W Gold',
+      'Fuente (PSU)',
+      20,
+      134.99,
+      'Estable',
+      'Conector nativo 12VHPWR verificado sin caídas de tensión.',
     ],
     [
       'Fuente Modular 650W Bronze (Unidad Antigua)',
@@ -85,6 +173,14 @@ function insertarDatosIniciales(db: Database): void {
       65.0,
       'Falla',
       'Presenta coil whine intenso y caída de voltaje en riel de 12V.',
+    ],
+    [
+      'Lian Li LANCOOL 216',
+      'Gabinete',
+      0,
+      99.99,
+      'Estable',
+      'Flujo de aire optimizado con ventiladores frontales de 160mm.',
     ],
   ];
 
@@ -172,6 +268,36 @@ export function obtenerDB(): Database {
     throw new Error('La base de datos SQLite aún no ha sido inicializada.');
   }
   return dbInstance;
+}
+
+/** Valida e instala un archivo SQLite externo como base activa. */
+export async function importarBaseDeDatos(bytes: Uint8Array): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const SQL = await initSqlJs({ locateFile: () => '/sql-wasm.wasm' });
+    const candidata = new SQL.Database(bytes);
+
+    registrarConsultaSQL("SELECT name FROM sqlite_master WHERE type='table' AND name='componentes';");
+    const valida = candidata.prepare(`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'componentes';
+    `);
+    const existeTabla = valida.step();
+    valida.free();
+
+    if (!existeTabla) {
+      candidata.close();
+      return { ok: false, error: 'El archivo no contiene la tabla SQLite requerida "componentes".' };
+    }
+
+    if (dbInstance) dbInstance.close();
+    dbInstance = candidata;
+    guardarBaseDeDatos();
+    return { ok: true };
+  } catch (error) {
+    console.error('Error al importar respaldo SQLite:', error);
+    return { ok: false, error: 'No se pudo leer el archivo como una base SQLite válida.' };
+  }
 }
 
 /**

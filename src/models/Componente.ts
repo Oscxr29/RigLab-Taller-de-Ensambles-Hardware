@@ -4,8 +4,10 @@ export const CATEGORIAS_VALIDAS = [
   'RAM',
   'Almacenamiento',
   'Placa Base',
+  'Placa Madre',
   'Fuente (PSU)',
   'Enfriamiento',
+  'Gabinete',
   'Ensamble Completo',
 ] as const;
 

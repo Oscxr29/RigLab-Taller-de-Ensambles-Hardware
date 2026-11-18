@@ -6,7 +6,11 @@ import {
   type ComponenteInput,
   type EstadoComponente,
 } from '../models/Componente';
-import { guardarBaseDeDatos, obtenerDB } from '../services/database';
+import {
+  guardarBaseDeDatos,
+  obtenerDB,
+  registrarConsultaSQL,
+} from '../services/database';
 
 export type CriterioOrden = 'recientes' | 'precio_desc' | 'consumo_desc' | 'nombre_asc';
 
@@ -24,6 +28,50 @@ export interface TelemetriaTaller {
   inversionTotal: number;
   totalFallas: number;
   totalEnPrueba: number;
+}
+
+export interface ResumenCategoria {
+  categoria: CategoriaComponente;
+  cantidad: number;
+  consumoTotalWatts: number;
+  inversionTotal: number;
+}
+
+export interface DiagnosticoExtremos {
+  mayorConsumo: Componente | null;
+  mayorCosto: Componente | null;
+  porcentajeEstable: number;
+  primeraFalla: Componente | null;
+}
+
+export interface ColumnaEsquema {
+  cid: number;
+  nombre: string;
+  tipo: string;
+  noNulo: number;
+  valorPredeterminado: string | null;
+  clavePrimaria: number;
+}
+
+/** Lee el esquema físico de la tabla componentes. */
+export function obtenerEsquemaComponentes(): ColumnaEsquema[] {
+  const db = obtenerDB();
+  registrarConsultaSQL('PRAGMA table_info(componentes);');
+  const stmt = db.prepare('PRAGMA table_info(componentes);');
+  const columnas: ColumnaEsquema[] = [];
+  while (stmt.step()) {
+    const fila = stmt.getAsObject();
+    columnas.push({
+      cid: Number(fila.cid),
+      nombre: String(fila.name),
+      tipo: String(fila.type),
+      noNulo: Number(fila.notnull),
+      valorPredeterminado: fila.dflt_value === null ? null : String(fila.dflt_value),
+      clavePrimaria: Number(fila.pk),
+    });
+  }
+  stmt.free();
+  return columnas;
 }
 
 /**
@@ -75,6 +123,7 @@ export function listarComponentes(filtros: FiltrosConsulta): Componente[] {
     ${clausulaWhere}
     ${clausulaOrderBy};
   `;
+  registrarConsultaSQL(sql);
 
   const stmt = db.prepare(sql);
   stmt.bind(parametros);
@@ -102,6 +151,7 @@ export function listarComponentes(filtros: FiltrosConsulta): Componente[] {
  */
 export function obtenerComponentePorId(id: number): Componente | null {
   const db = obtenerDB();
+  registrarConsultaSQL('SELECT id, nombre, categoria, consumo, precio, estado, notas FROM componentes WHERE id = ?;');
   const stmt = db.prepare(`
     SELECT id, nombre, categoria, consumo, precio, estado, notas
     FROM componentes
@@ -140,6 +190,7 @@ export function crearComponente(input: ComponenteInput): { ok: boolean; errores:
   const { nombre, categoria, consumo, precio, estado, notas } = validacion.datosLimpios;
 
   try {
+    registrarConsultaSQL('INSERT INTO componentes (nombre, categoria, consumo, precio, estado, notas) VALUES (?, ?, ?, ?, ?, ?);');
     db.run(
       `INSERT INTO componentes (nombre, categoria, consumo, precio, estado, notas)
        VALUES (?, ?, ?, ?, ?, ?);`,
@@ -176,6 +227,7 @@ export function actualizarComponente(
   const { nombre, categoria, consumo, precio, estado, notas } = validacion.datosLimpios;
 
   try {
+    registrarConsultaSQL('UPDATE componentes SET nombre = ?, categoria = ?, consumo = ?, precio = ?, estado = ?, notas = ? WHERE id = ?;');
     db.run(
       `UPDATE componentes
        SET nombre = ?, categoria = ?, consumo = ?, precio = ?, estado = ?, notas = ?
@@ -206,6 +258,7 @@ export function cambiarEstadoRapido(
 
   const db = obtenerDB();
   try {
+    registrarConsultaSQL('UPDATE componentes SET estado = ? WHERE id = ?;');
     db.run('UPDATE componentes SET estado = ? WHERE id = ?;', [nuevoEstado, id]);
     guardarBaseDeDatos();
     return { ok: true };
@@ -225,6 +278,7 @@ export function eliminarComponente(id: number): { ok: boolean; error?: string } 
 
   const db = obtenerDB();
   try {
+    registrarConsultaSQL('DELETE FROM componentes WHERE id = ?;');
     db.run('DELETE FROM componentes WHERE id = ?;', [id]);
     guardarBaseDeDatos();
     return { ok: true };
@@ -239,6 +293,7 @@ export function eliminarComponente(id: number): { ok: boolean; error?: string } 
  */
 export function obtenerTelemetria(): TelemetriaTaller {
   const db = obtenerDB();
+  registrarConsultaSQL('SELECT COUNT(*), SUM(consumo), SUM(precio), estados FROM componentes;');
   const stmt = db.prepare(`
     SELECT
       COUNT(*) AS total,
@@ -277,4 +332,112 @@ export function obtenerTelemetria(): TelemetriaTaller {
   stmt.free();
 
   return telemetria;
+}
+
+/** Agrupa componentes por categoría con totales reales almacenados en SQLite. */
+export function obtenerResumenPorCategoria(): ResumenCategoria[] {
+  const db = obtenerDB();
+  registrarConsultaSQL('SELECT categoria, COUNT(*), SUM(consumo), SUM(precio) FROM componentes GROUP BY categoria;');
+  const stmt = db.prepare(`
+    SELECT
+      categoria,
+      COUNT(*) AS cantidad,
+      COALESCE(SUM(consumo), 0) AS consumoTotal,
+      COALESCE(SUM(precio), 0) AS inversionTotal
+    FROM componentes
+    GROUP BY categoria
+    ORDER BY consumoTotal DESC, categoria ASC;
+  `);
+
+  const resumen: ResumenCategoria[] = [];
+  while (stmt.step()) {
+    const fila = stmt.getAsObject();
+    resumen.push({
+      categoria: String(fila.categoria) as CategoriaComponente,
+      cantidad: Number(fila.cantidad) || 0,
+      consumoTotalWatts: Number(fila.consumoTotal) || 0,
+      inversionTotal: Number(fila.inversionTotal) || 0,
+    });
+  }
+  stmt.free();
+
+  return resumen;
+}
+
+/** Consulta los extremos del inventario y el porcentaje de unidades estables. */
+export function obtenerDiagnosticoExtremos(): DiagnosticoExtremos {
+  const db = obtenerDB();
+
+  const obtenerExtremo = (orden: 'consumo' | 'precio'): Componente | null => {
+    registrarConsultaSQL(`SELECT ... FROM componentes ORDER BY ${orden} DESC LIMIT 1;`);
+    const stmt = db.prepare(`
+      SELECT id, nombre, categoria, consumo, precio, estado, notas
+      FROM componentes
+      ORDER BY ${orden} DESC, id DESC
+      LIMIT 1;
+    `);
+
+    let componente: Componente | null = null;
+    if (stmt.step()) {
+      const fila = stmt.getAsObject();
+      componente = {
+        id: Number(fila.id),
+        nombre: String(fila.nombre),
+        categoria: String(fila.categoria) as CategoriaComponente,
+        consumo: Number(fila.consumo),
+        precio: Number(fila.precio),
+        estado: String(fila.estado) as EstadoComponente,
+        notas: fila.notas ? String(fila.notas) : '',
+      };
+    }
+    stmt.free();
+    return componente;
+  };
+
+  const stmtPorcentaje = db.prepare(`
+    SELECT
+      COALESCE(100.0 * SUM(CASE WHEN estado = ? THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 0)
+        AS porcentajeEstable
+    FROM componentes;
+  `);
+  registrarConsultaSQL("SELECT porcentaje Estable FROM componentes WHERE estado = ?;");
+  stmtPorcentaje.bind(['Estable']);
+
+  let porcentajeEstable = 0;
+  if (stmtPorcentaje.step()) {
+    porcentajeEstable = Math.round(Number(stmtPorcentaje.getAsObject().porcentajeEstable) || 0);
+  }
+  stmtPorcentaje.free();
+
+  registrarConsultaSQL("SELECT ... FROM componentes WHERE estado = 'Falla' ORDER BY id ASC LIMIT 1;");
+  const stmtFalla = db.prepare(`
+    SELECT id, nombre, categoria, consumo, precio, estado, notas
+    FROM componentes
+    WHERE estado = ?
+    ORDER BY id ASC
+    LIMIT 1;
+  `);
+  stmtFalla.bind(['Falla']);
+
+  let primeraFalla: Componente | null = null;
+  if (stmtFalla.step()) {
+    const fila = stmtFalla.getAsObject();
+    primeraFalla = {
+      id: Number(fila.id),
+      nombre: String(fila.nombre),
+      categoria: String(fila.categoria) as CategoriaComponente,
+      consumo: Number(fila.consumo),
+      precio: Number(fila.precio),
+      estado: String(fila.estado) as EstadoComponente,
+      notas: fila.notas ? String(fila.notas) : '',
+    };
+  }
+  stmtFalla.free();
+
+  return {
+    mayorConsumo: obtenerExtremo('consumo'),
+    mayorCosto: obtenerExtremo('precio'),
+    porcentajeEstable,
+    primeraFalla,
+  };
 }

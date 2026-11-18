@@ -5,10 +5,20 @@ import {
   type EstadoComponente,
 } from '../models/Componente';
 import type { FiltrosConsulta, TelemetriaTaller } from '../repositories/componenteRepo';
+import type {
+  DiagnosticoExtremos,
+  ResumenCategoria,
+  ColumnaEsquema,
+} from '../repositories/componenteRepo';
+import type { ConsultaSQLRegistrada } from '../services/database';
 
 export interface EstadoUI {
   componentes: Componente[];
   telemetria: TelemetriaTaller;
+  resumenCategorias: ResumenCategoria[];
+  diagnostico: DiagnosticoExtremos;
+  esquema: ColumnaEsquema[];
+  consultasSQL: ConsultaSQLRegistrada[];
   filtros: FiltrosConsulta;
   componenteEditando: Componente | null;
   mensajeFeedback: {
@@ -40,8 +50,33 @@ function obtenerClaseEstado(estado: EstadoComponente): string {
   }
 }
 
+function obtenerColorCategoria(categoria: string): string {
+  const colores: Record<string, string> = {
+    GPU: '#06b6d4',
+    CPU: '#3b82f6',
+    'Placa Madre': '#6366f1',
+    RAM: '#8b5cf6',
+    Almacenamiento: '#10b981',
+    Enfriamiento: '#22d3ee',
+    'Fuente (PSU)': '#f59e0b',
+    Gabinete: '#94a3b8',
+    'Ensamble Completo': '#22c55e',
+  };
+  return colores[categoria] ?? '#06b6d4';
+}
+
 export function renderizarAplicacion(contenedor: HTMLElement, estado: EstadoUI): void {
-  const { componentes, telemetria, filtros, componenteEditando, mensajeFeedback } = estado;
+  const {
+    componentes,
+    telemetria,
+    resumenCategorias,
+    diagnostico,
+    esquema,
+    consultasSQL,
+    filtros,
+    componenteEditando,
+    mensajeFeedback,
+  } = estado;
   const esEdicion = componenteEditando !== null;
 
   // Porcentaje real de carga respecto a la PSU recomendada calculada desde SQLite
@@ -52,15 +87,68 @@ export function renderizarAplicacion(contenedor: HTMLElement, estado: EstadoUI):
           Math.round((telemetria.consumoTotalWatts / telemetria.psuRecomendadaWatts) * 100)
         )
       : 0;
+  const porcentajeEstable = diagnostico.porcentajeEstable;
+  const colorCarga =
+    porcentajeCargaPsu > 90 ? '#f43f5e' :
+    porcentajeCargaPsu >= 75 ? '#f59e0b' : '#06b6d4';
+  const colorSalud =
+    porcentajeEstable >= 80 ? '#10b981' :
+    porcentajeEstable >= 50 ? '#f59e0b' : '#ef4444';
+  const circunferencia = 276.46;
+  const desplazamientoCarga = circunferencia * (1 - porcentajeCargaPsu / 100);
+  const desplazamientoEstable = circunferencia * (1 - porcentajeEstable / 100);
+  const consumoMaximoCategoria = resumenCategorias.reduce(
+    (maximo, categoria) => Math.max(maximo, categoria.consumoTotalWatts),
+    0
+  );
+  const distribucionCategorias = resumenCategorias
+    .map((categoria) => {
+      const coloresCategoria: Record<string, string> = {
+        GPU: '#06b6d4',
+        CPU: '#3b82f6',
+        'Placa Madre': '#6366f1',
+        RAM: '#8b5cf6',
+        Almacenamiento: '#10b981',
+        Enfriamiento: '#22d3ee',
+        'Fuente (PSU)': '#f59e0b',
+        Gabinete: '#94a3b8',
+        'Ensamble Completo': '#22c55e',
+      };
+      const colorCategoria = coloresCategoria[categoria.categoria] ?? '#06b6d4';
+      const ancho =
+        consumoMaximoCategoria > 0
+          ? Math.max(2, Math.round((categoria.consumoTotalWatts / consumoMaximoCategoria) * 100))
+          : 0;
+      return `
+        <div class="categoria-fila">
+          <div class="categoria-datos" style="--categoria-color: ${colorCategoria}">
+            <span class="categoria-nombre">${escaparHTML(categoria.categoria)}</span>
+            <strong>${categoria.cantidad} · ${categoria.consumoTotalWatts} W · $${categoria.inversionTotal.toFixed(2)}</strong>
+          </div>
+          <svg class="categoria-barra" viewBox="0 0 100 8" preserveAspectRatio="none" role="img"
+            aria-label="${escaparHTML(categoria.categoria)}: ${categoria.consumoTotalWatts} Watts">
+            <rect class="categoria-barra-fondo" x="0" y="1" width="100" height="6" rx="3"></rect>
+            <rect class="categoria-barra-valor" x="0" y="1" width="${ancho}" height="6" rx="3" fill="${colorCategoria}" style="filter: drop-shadow(0 0 2px ${colorCategoria})"></rect>
+          </svg>
+        </div>
+      `;
+    })
+    .join('');
 
   const opcionesCategoriasForm = CATEGORIAS_VALIDAS.map((cat) => {
     const selected = componenteEditando?.categoria === cat ? 'selected' : '';
     return `<option value="${cat}" ${selected}>${cat}</option>`;
   }).join('');
 
-  const opcionesEstadosForm = ESTADOS_VALIDOS.map((est) => {
-    const selected = (componenteEditando?.estado ?? 'Estable') === est ? 'selected' : '';
-    return `<option value="${est}" ${selected}>${est}</option>`;
+  const estadoInicialForm = componenteEditando?.estado ?? 'Estable';
+  const botonesEstadoForm = ESTADOS_VALIDOS.map((est) => {
+    const activo = estadoInicialForm === est ? 'activo' : '';
+    const claseEstado = est === 'Estable' ? 'estable' : est === 'En Prueba' ? 'prueba' : 'falla';
+    return `
+      <button type="button" class="pildora-estado ${claseEstado} ${activo}" data-estado="${est}" aria-pressed="${estadoInicialForm === est}">
+        ${escaparHTML(est)}
+      </button>
+    `;
   }).join('');
 
   const opcionesFiltroCategoria = ['Todas', ...CATEGORIAS_VALIDAS]
@@ -96,7 +184,7 @@ export function renderizarAplicacion(contenedor: HTMLElement, estado: EstadoUI):
           <article class="card-componente estado-borde-${comp.estado.toLowerCase().replace(/\s+/g, '-')}" data-id="${comp.id}">
             <div class="card-header">
               <div class="card-titulos">
-                <span class="chip-categoria">${escaparHTML(comp.categoria)}</span>
+                <span class="chip-categoria" style="color:${obtenerColorCategoria(comp.categoria)};border-color:${obtenerColorCategoria(comp.categoria)}">${escaparHTML(comp.categoria)}</span>
                 <h3 class="card-titulo">${escaparHTML(comp.nombre)}</h3>
               </div>
               <span class="badge-estado ${obtenerClaseEstado(comp.estado)}">
@@ -192,43 +280,61 @@ export function renderizarAplicacion(contenedor: HTMLElement, estado: EstadoUI):
           </div>
         </div>
 
-        <button type="button" id="btn-reiniciar-taller" class="btn-secundario">
-          Restaurar Demo
-        </button>
+        <div class="topbar-actions">
+          <button type="button" id="btn-descargar-backup" class="btn-secundario btn-backup">
+            Descargar .sqlite
+          </button>
+          <button type="button" id="btn-importar-backup" class="btn-secundario btn-backup">
+            Importar .sqlite
+          </button>
+          <input type="file" id="input-importar-backup" accept=".sqlite,.db" style="display:none" />
+          <button type="button" id="btn-reiniciar-taller" class="btn-secundario">
+            Restaurar Demo
+          </button>
+        </div>
       </header>
 
       <section class="panel-telemetria" aria-label="Telemetría del banco de pruebas">
-        <div class="kpi-card">
-          <div class="kpi-top">
-            <span class="kpi-titulo">UNIDADES EN BANCO</span>
-            <span class="kpi-tag">SQL COUNT</span>
+        <div class="medidor-card">
+          <div class="medidor-titulos">
+            <span>CARGA DE PSU</span>
+            <strong>${telemetria.consumoTotalWatts} W</strong>
           </div>
-          <strong class="kpi-dato">${telemetria.totalComponentes}</strong>
-          <div class="kpi-subdatos">
-            <span class="tag-mini-prueba">${telemetria.totalEnPrueba} en prueba</span>
-            <span class="tag-mini-falla">${telemetria.totalFallas} falla(s)</span>
+          <svg class="medidor-svg" viewBox="0 0 100 100" role="img" aria-label="Carga de PSU ${porcentajeCargaPsu}%">
+            <circle class="medidor-fondo" cx="50" cy="50" r="44"></circle>
+            <circle class="medidor-progreso carga" cx="50" cy="50" r="44" style="stroke:${colorCarga}"
+              stroke-dasharray="${circunferencia}" stroke-dashoffset="${desplazamientoCarga}"></circle>
+          </svg>
+          <div class="medidor-valor">
+            <strong>${porcentajeCargaPsu}%</strong>
+            <span>${telemetria.psuRecomendadaWatts} W PSU</span>
           </div>
         </div>
 
-        <div class="kpi-card">
-          <div class="kpi-top">
-            <span class="kpi-titulo">CARGA TÉRMICA / ENERGÍA</span>
-            <span class="kpi-tag">${porcentajeCargaPsu}% PSU</span>
+        <div class="medidor-card">
+          <div class="medidor-titulos">
+            <span>SALUD DEL RIG</span>
+            <strong>${diagnostico.porcentajeEstable}% ESTABLE</strong>
           </div>
-          <strong class="kpi-dato valor-cyan">${telemetria.consumoTotalWatts} W</strong>
-          <div class="barra-progreso" aria-hidden="true">
-            <div class="barra-progreso-fill" style="width: ${porcentajeCargaPsu}%"></div>
+          <svg class="medidor-svg" viewBox="0 0 100 100" role="img" aria-label="Salud del rig ${porcentajeEstable}% estable">
+            <circle class="medidor-fondo" cx="50" cy="50" r="44"></circle>
+            <circle class="medidor-progreso salud" cx="50" cy="50" r="44" style="stroke:${colorSalud}"
+              stroke-dasharray="${circunferencia}" stroke-dashoffset="${desplazamientoEstable}"></circle>
+          </svg>
+          <div class="medidor-valor">
+            <strong>${porcentajeEstable}%</strong>
+            <span>${telemetria.totalComponentes} UNIDADES</span>
           </div>
-          <span class="kpi-detalle">PSU recomendada (+25%): <strong>${telemetria.psuRecomendadaWatts} W</strong></span>
         </div>
 
-        <div class="kpi-card">
-          <div class="kpi-top">
-            <span class="kpi-titulo">PRESUPUESTO DEL RIG</span>
-            <span class="kpi-tag">USD</span>
+        <div class="presupuesto-card">
+          <span class="kpi-titulo">PRESUPUESTO TOTAL</span>
+          <strong class="presupuesto-valor">$${telemetria.inversionTotal.toFixed(2)}</strong>
+          <div class="estado-contadores">
+            <div><strong>${telemetria.totalComponentes}</strong><span>TOTAL</span></div>
+            <div><strong class="texto-prueba">${telemetria.totalEnPrueba}</strong><span>EN PRUEBA</span></div>
+            <div><strong class="texto-falla">${telemetria.totalFallas}</strong><span>FALLA</span></div>
           </div>
-          <strong class="kpi-dato">$${telemetria.inversionTotal.toFixed(2)}</strong>
-          <span class="kpi-detalle">Suma total de componentes activos</span>
         </div>
       </section>
 
@@ -241,6 +347,15 @@ export function renderizarAplicacion(contenedor: HTMLElement, estado: EstadoUI):
             <h2 id="titulo-formulario">
               ${esEdicion ? `EDITAR: ${escaparHTML(componenteEditando.nombre)}` : 'REGISTRAR COMPONENTE'}
             </h2>
+          </div>
+
+          <div class="presets-prueba" aria-label="Presets de prueba rápida">
+            <span class="presets-titulo">PRESETS DE PRUEBA RAPIDA</span>
+            <div class="presets-lista">
+              <button type="button" class="preset-chip" data-preset="entrada">Preset 1 · Entrada</button>
+              <button type="button" class="preset-chip" data-preset="media">Preset 2 · Gama Media</button>
+              <button type="button" class="preset-chip" data-preset="alta">Preset 3 · Gama Alta</button>
+            </div>
           </div>
 
           <form id="form-componente" novalidate>
@@ -296,10 +411,11 @@ export function renderizarAplicacion(contenedor: HTMLElement, estado: EstadoUI):
             </div>
 
             <div class="campo-grupo">
-              <label for="select-estado">Estado de Diagnóstico *</label>
-              <select id="select-estado" name="estado" required>
-                ${opcionesEstadosForm}
-              </select>
+              <span class="campo-label">Estado de Diagnóstico *</span>
+              <input type="hidden" id="input-estado" name="estado" value="${estadoInicialForm}" />
+              <div class="pildoras-estado" role="group" aria-label="Estado de diagnóstico">
+                ${botonesEstadoForm}
+              </div>
             </div>
 
             <div class="campo-grupo">
@@ -324,6 +440,33 @@ export function renderizarAplicacion(contenedor: HTMLElement, estado: EstadoUI):
               }
             </div>
           </form>
+
+          <section class="tarjeta-diagnostic" aria-label="Diagnóstico del taller">
+            <div class="diagnostic-cabecera">
+              <span>DIAGNOSTIC</span>
+              <strong class="${porcentajeEstable >= 70 ? 'texto-estable' : porcentajeEstable > 0 ? 'texto-prueba' : 'texto-falla'}">
+                ${porcentajeEstable >= 70 ? 'NORMAL' : porcentajeEstable > 0 ? 'REVISAR' : 'SIN DATOS'}
+              </strong>
+            </div>
+            <div class="diagnostic-fila">
+              <span>MAYOR CONSUMO</span>
+              <strong>${diagnostico.mayorConsumo ? `${escaparHTML(diagnostico.mayorConsumo.nombre)} · ${diagnostico.mayorConsumo.consumo} W` : 'Sin registros'}</strong>
+            </div>
+            <div class="diagnostic-fila">
+              <span>MAYOR COSTO</span>
+              <strong>${diagnostico.mayorCosto ? `${escaparHTML(diagnostico.mayorCosto.nombre)} · $${diagnostico.mayorCosto.precio.toFixed(2)}` : 'Sin registros'}</strong>
+            </div>
+            <div class="diagnostic-fila">
+              <span>ESTADO GENERAL</span>
+              <strong>${porcentajeEstable}% unidades Estables</strong>
+            </div>
+            <div class="diagnostic-fila">
+              <span>ALERTA DE FALLA</span>
+              ${diagnostico.primeraFalla
+                ? `<strong class="texto-falla">${escaparHTML(diagnostico.primeraFalla.nombre)}</strong>`
+                : '<strong class="texto-estable">Ninguna detectada</strong>'}
+            </div>
+          </section>
         </section>
 
         <section class="panel-inventario" aria-labelledby="titulo-inventario">
@@ -334,6 +477,14 @@ export function renderizarAplicacion(contenedor: HTMLElement, estado: EstadoUI):
             </div>
             <span class="contador-resultados">${componentes.length} registro(s)</span>
           </div>
+
+          <section class="panel-categorias" aria-label="Distribución por categoría">
+            <div class="categoria-cabecera">
+              <span>DISTRIBUCIÓN POR CATEGORÍA</span>
+              <span>UNIDADES · WATTS · USD</span>
+            </div>
+            ${distribucionCategorias || '<p class="categoria-vacia">Sin datos agregados.</p>'}
+          </section>
 
           <div class="barra-filtros">
             <div class="filtro-busqueda">
@@ -372,6 +523,36 @@ export function renderizarAplicacion(contenedor: HTMLElement, estado: EstadoUI):
           </div>
         </section>
       </main>
+
+      <details class="sql-inspector">
+        <summary>⚙️ SQLite Engine Inspector &amp; Schema</summary>
+        <div class="sql-inspector-contenido">
+          <section class="sql-schema" aria-label="Esquema de componentes">
+            <h3>PRAGMA table_info(componentes)</h3>
+            <div class="schema-tabla">
+              ${esquema.map((columna) => `
+                <div class="schema-fila">
+                  <code>${escaparHTML(columna.nombre)}</code>
+                  <span>${escaparHTML(columna.tipo)}</span>
+                  <span>${columna.clavePrimaria ? 'PK' : columna.noNulo ? 'NOT NULL' : 'NULL'}</span>
+                </div>
+              `).join('')}
+            </div>
+          </section>
+          <section class="sql-log" aria-label="Consultas SQL recientes">
+            <h3>ÚLTIMAS 6 CONSULTAS</h3>
+            ${consultasSQL.length
+              ? consultasSQL.slice().reverse().map((consulta) => `
+                  <div class="sql-log-fila">
+                    <time>${escaparHTML(consulta.fecha)}</time>
+                    <span class="sql-operacion sql-${consulta.operacion.toLowerCase()}">${escaparHTML(consulta.operacion)}</span>
+                    <code>${escaparHTML(consulta.sql)}</code>
+                  </div>
+                `).join('')
+              : '<p class="sql-vacio">Sin consultas registradas.</p>'}
+          </section>
+        </div>
+      </details>
     </div>
   `;
 }
