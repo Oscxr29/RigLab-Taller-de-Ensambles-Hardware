@@ -147,6 +147,14 @@ body {
   border-radius: 999px;
 }
 
+.descripcion-riglab {
+  max-width: 720px;
+  margin-top: 0.45rem;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .punto-activo {
   width: 7px;
   height: 7px;

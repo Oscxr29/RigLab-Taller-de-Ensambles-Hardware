@@ -277,6 +277,10 @@ export function renderizarAplicacion(contenedor: HTMLElement, estado: EstadoUI):
               <span class="punto-activo" aria-hidden="true"></span>
               <span>SQLite Engine · Persistencia Local</span>
             </div>
+            <p class="descripcion-riglab">
+              RigLab ofrece telemetría energética y calcula el margen recomendado de PSU.<br />
+              Centraliza el inventario, controla CRUD y persiste la base SQLite localmente en el navegador.
+            </p>
           </div>
         </div>
 
